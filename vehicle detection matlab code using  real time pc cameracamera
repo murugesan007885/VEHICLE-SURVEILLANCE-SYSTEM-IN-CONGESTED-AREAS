@@ -1,0 +1,37 @@
+% Create a video object to capture from the webcam
+cam = webcam('Chicony USB2.0 Camera');
+preview(cam);
+
+% Load the YOLOv2 object detector
+model = load('yolov2VehicleDetector.mat');
+vehicleDetector = model.detector;
+
+% Create a video player object to display the results
+videoPlayer = vision.VideoPlayer('Position', [100, 100, 640, 480]);
+
+while true
+    % Capture a frame from the webcam
+    frame = snapshot(cam);
+
+    % Detect objects (vehicles, lanes, etc.) in the frame
+    [bboxes, scores, labels] = detect(vehicleDetector, frame);
+
+    % Annotate detected objects in the frame
+    if ~isempty(bboxes)
+        % Draw rectangles around detected objects
+        frame = insertObjectAnnotation(frame, 'rectangle', bboxes, labels);
+    end
+
+    % Display the annotated frame
+    step(videoPlayer, frame);
+
+    % Break the loop if the video player is closed
+    if ~isOpen(videoPlayer)
+        break;
+    end
+end
+
+% Release resources
+clear cam;
+release(videoPlayer);
+
