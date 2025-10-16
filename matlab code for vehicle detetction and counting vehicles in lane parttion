@@ -1,0 +1,179 @@
+
+% Load YOLOv2 detector
+vehicleModel = load('yolov2VehicleDetector.mat');
+vehicleDetector = vehicleModel.detector;
+
+% Load LaneNet
+lanenetFile = matlab.internal.examples.downloadSupportFile( ...
+    'gpucoder/cnn_models/lane_detection','trainedLaneNet.mat');
+laneNetStruct = load(lanenetFile);
+laneNet = laneNetStruct.laneNet;
+
+% Load input video file
+video = VideoReader('traffic2.mp4');  % <-- Replace with your actual video file
+
+% Setup video player
+videoPlayer = vision.VideoPlayer('Position', [100, 100, 640, 480]);
+
+% Optional video recording
+recordOutput = false;
+if recordOutput
+    writer = VideoWriter('merged_output.avi');
+    writer.FrameRate = video.FrameRate;
+    open(writer);
+end
+
+% Kalman tracking setup
+tracks = struct('id', {}, 'bbox', {}, 'kalman', {}, 'age', {}, 'visibleCount', {}, 'centroidHistory', {});
+nextId = 1;
+maxInvisibleFrames = 20;
+countedIDs = [];
+
+% Lane setup
+numLanes = 4;
+laneCounts = zeros(1, numLanes);
+
+frameCount = 0;
+disp("Processing video...");
+
+while hasFrame(video)
+    frame = readFrame(video);
+    frameCount = frameCount + 1;
+    imgSize = size(frame);
+    laneWidth = imgSize(2) / numLanes;
+
+    % === Vehicle Detection ===
+    [bboxes, scores, labels] = detect(vehicleDetector, frame);
+    minConfidence = 0.6;
+    valid = scores > minConfidence;
+    bboxes = bboxes(valid, :);
+    labels = labels(valid);
+
+    % === Predict track positions ===
+    for i = 1:numel(tracks)
+        predictedCentroid = predict(tracks(i).kalman);
+        tracks(i).bbox(1:2) = predictedCentroid - tracks(i).bbox(3:4) / 2;
+    end
+
+    % === Associate detections with tracks ===
+    assignments = [];
+    unassignedDetections = 1:size(bboxes, 1);
+    unassignedTracks = 1:numel(tracks);
+    if ~isempty(bboxes) && ~isempty(tracks)
+        cost = zeros(numel(tracks), size(bboxes, 1));
+        for i = 1:numel(tracks)
+            for j = 1:size(bboxes, 1)
+                cost(i, j) = norm(bboxCenter(tracks(i).bbox) - bboxCenter(bboxes(j, :)));
+            end
+        end
+        [assignments, unassignedTracks, unassignedDetections] = assignDetectionsToTracks(cost, 40);
+    end
+
+    % === Update assigned tracks ===
+    for i = 1:size(assignments, 1)
+        trackIdx = assignments(i, 1);
+        detectionIdx = assignments(i, 2);
+        centroid = bboxCenter(bboxes(detectionIdx, :));
+        correct(tracks(trackIdx).kalman, centroid);
+        tracks(trackIdx).bbox = bboxes(detectionIdx, :);
+        tracks(trackIdx).age = 0;
+        tracks(trackIdx).visibleCount = tracks(trackIdx).visibleCount + 1;
+        tracks(trackIdx).centroidHistory(end+1, :) = centroid;
+    end
+
+    % === Age and remove lost tracks ===
+    for i = 1:length(unassignedTracks)
+        tracks(unassignedTracks(i)).age = tracks(unassignedTracks(i)).age + 1;
+    end
+    tracks = tracks([tracks.age] <= maxInvisibleFrames);
+
+    % === Create new tracks ===
+    for i = 1:length(unassignedDetections)
+        idx = unassignedDetections(i);
+        centroid = bboxCenter(bboxes(idx, :));
+        kalman = configureKalman(centroid);
+        newTrack = struct( ...
+            'id', nextId, ...
+            'bbox', bboxes(idx, :), ...
+            'kalman', kalman, ...
+            'age', 0, ...
+            'visibleCount', 1, ...
+            'centroidHistory', centroid ...
+        );
+        tracks(end+1) = newTrack;
+
+        % Count vehicle in the appropriate lane
+        if ~ismember(nextId, countedIDs)
+            xCenter = centroid(1);
+            laneIdx = min(numLanes, max(1, ceil(xCenter / laneWidth)));
+            laneCounts(laneIdx) = laneCounts(laneIdx) + 1;
+            countedIDs(end+1) = nextId;
+        end
+        nextId = nextId + 1;
+    end
+
+    % === Lane Detection (every 2nd frame) ===
+    if mod(frameCount, 2) == 0
+        resizedFrame = imresize(frame, [227 227]);
+        inputImg = single(resizedFrame) / 255;
+        laneOut = predict(laneNet, inputImg);
+
+        leftCoeff = laneOut(1:3);
+        rightCoeff = laneOut(4:6);
+
+        xPts = linspace(1, size(frame, 2), 100);
+        yLeft = polyval(flip(leftCoeff), xPts);
+        yRight = polyval(flip(rightCoeff), xPts);
+
+        validIdx = yLeft > 0 & yLeft < size(frame, 1) & ...
+                   yRight > 0 & yRight < size(frame, 1);
+
+        if any(validIdx)
+            leftLine = [xPts(validIdx)', yLeft(validIdx)'];
+            rightLine = [xPts(validIdx)', yRight(validIdx)'];
+            frame = insertShape(frame, 'Line', ...
+                [leftLine(1:end-1,:) rightLine(2:end,:)], ...
+                'Color', 'green', 'LineWidth', 2);
+        end
+    end
+
+    % === Draw bounding boxes ===
+    for i = 1:numel(tracks)
+        label = sprintf("ID: %d", tracks(i).id);
+        frame = insertObjectAnnotation(frame, 'rectangle', tracks(i).bbox, label, 'Color', 'cyan');
+    end
+
+    % === Show count info ===
+    [~, maxLane] = max(laneCounts);
+    infoText = sprintf("Max Lane: %d | Counts: [%s]", maxLane, num2str(laneCounts));
+    frame = insertText(frame, [10, 10], infoText, 'FontSize', 16, 'BoxColor', 'yellow');
+
+    % Display frame
+    step(videoPlayer, frame);
+
+    % Write to video
+    if recordOutput
+        writeVideo(writer, frame);
+    end
+
+    if ~isOpen(videoPlayer)
+        break;
+    end
+end
+
+% Cleanup
+release(videoPlayer);
+if recordOutput
+    close(writer);
+end
+disp("Video processing complete.");
+
+%% Helper functions
+function center = bboxCenter(bbox)
+    center = [bbox(1) + bbox(3)/2, bbox(2) + bbox(4)/2];
+end
+
+function kalman = configureKalman(centroid)
+    kalman = configureKalmanFilter('ConstantVelocity', ...
+        centroid, [100, 25], [100, 25], 100);
+end
