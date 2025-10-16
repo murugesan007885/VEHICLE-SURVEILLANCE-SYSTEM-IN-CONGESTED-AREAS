@@ -1,0 +1,89 @@
+%VEHICLE SURVEILLANCE SYSTEM IN CONGESTED AREAS
+
+% uno warriors - Speed Detection with Arduino Nano in MATLAB
+% Converted from Arduino IDE code
+
+clear; clc;
+
+% === Parameters ===
+distance = 5; % meters between IR sensors
+speed = 0;
+Time = 0;
+timer1 = 0;
+timer2 = 0;
+flag1 = 0;
+flag2 = 0;
+
+% === Arduino Pins (same as in Arduino IDE) ===
+ir_s1 = 'A0';
+ir_s2 = 'A1';
+buzzer = 'D13';
+
+% === Connect to Arduino Nano (set correct COM port) ===
+% Replace COM6 with your actual port if needed
+a = arduino('COM7', 'Nano3');
+
+% Configure pins
+configurePin(a, ir_s1, 'DigitalInput');
+configurePin(a, ir_s2, 'DigitalInput');
+configurePin(a, buzzer, 'DigitalOutput');
+
+% === Welcome message (similar to Serial.println in Arduino) ===
+disp("WELCOME To UNO warriors");
+pause(0.5); % delay(2000)
+
+% === Main Loop ===
+while true
+    % IR sensor detection
+    if readDigitalPin(a, ir_s1) == 0 && flag1 == 0
+        timer1 = millis();
+        flag1 = 1;
+    end
+
+    if readDigitalPin(a, ir_s2) == 0 && flag2 == 0
+        timer2 = millis();
+        flag2 = 1;
+    end
+
+    % Speed calculation
+    if flag1 == 1 && flag2 == 1
+        Time = abs(timer2 - timer1) / 1000.0; % Convert ms to s
+        speed = (distance / Time) * 3.6;      % Convert m/s to Km/h
+    end
+
+    % Output messages (equivalent to Serial.print/println)
+    if speed == 0
+        if flag1 == 0 && flag2 == 0
+            disp("No car detected");
+        else
+            disp("Searching...");
+        end
+    else
+        fprintf("Speed: %.1f Km/Hr\n", speed);
+
+        if speed > 50
+            disp("Over Speeding");
+            writeDigitalPin(a, buzzer, 1);
+        else
+            disp("Normal Speed");
+        end
+
+        pause(1); % Hold output (like delay(5000))
+        writeDigitalPin(a, buzzer, 0);
+
+        % Reset variables
+        speed = 0;
+        flag1 = 0;
+        flag2 = 0;
+        timer1 = 0;
+        timer2 = 0;
+        Time = 0;
+    end
+
+    pause(0.1); % Reduce CPU usage
+end
+
+function t = millis()
+    t = round(posixtime(datetime('now')) * 1000);
+end
+
